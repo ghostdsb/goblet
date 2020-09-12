@@ -12,6 +12,10 @@ defmodule Goblet.MatchFunction2 do
     GenServer.cast(__MODULE__, {"send_to_queue", player_details})
   end
 
+  def remove_player(player_id) do
+    GenServer.cast(__MODULE__, {"remove_player", player_id})
+  end
+
   #################
 
   @impl true
@@ -22,31 +26,22 @@ defmodule Goblet.MatchFunction2 do
   end
 
   @impl true
-  def handle_cast({"send_to_queue", player_details}, socket) do
+  def handle_cast({"send_to_queue", player_details}, state) do
     player_details |> handle_room_entry()
+    {:noreply, state}
 
-    '''
-    get_game_queue
-    |> push_player_to_queue(player_details)
-    |>
+  end
 
-    push_player_to_queue([], player_details) -> ets.insert(game_room, Map.new([{player_id, player_details_map}]))
+  @impl true
+  def handle_cast({"remove_player", player_id}, state) do
+    ets_remove_player_data(player_id)
+    {:noreply, state}
+  end
 
-    if game_room available in ets
-      -> if player_id key in map
-          ->nil
-      else
-        if Count(Map.keys(game_queue)) >= count-1
-            pull count-1 players and self in a list |> send to match_builder
-        else
-            Map.put(game_queue_map, player_id, player_details_map)
-    else ets.insert(game_room, Map.new([{player_id, player_details_map}]))
-
-
-
-    '''
-
-    {:noreply, socket}
+  @impl true
+  def handle_info({"no_match", room_name}, state) do
+    GobletWeb.Endpoint.broadcast!("match_maker:#{room_name}", "match_not_found", %{})
+    {:noreply, state}
   end
 
 ################
@@ -59,6 +54,7 @@ defmodule Goblet.MatchFunction2 do
   defp handle_room_entry(player_details) do
     room_name = player_details["room_name"]
 
+    Process.send_after(self(), {"no_match", room_name}, 60_000)
     room_name
     |> get_map_players_in_room()
     |> put_player_in_room(player_details)
@@ -81,6 +77,7 @@ defmodule Goblet.MatchFunction2 do
     game_room = player_details["room_name"]
     match_id = player_details["match_id"] || ""
     map_first_player_in_room = Map.new([{player_id, %{"match_id" => match_id}}])
+    update_player_map(player_id, game_room)
     ets_insert_into_room_collection(map_first_player_in_room, game_room)
   end
 
@@ -88,7 +85,8 @@ defmodule Goblet.MatchFunction2 do
     player_id = player_details["player_id"]
     player_count = player_details["player_count"]
     players_in_room_count = map_players_in_room |> Map.keys |> Enum.count
-
+    game_room = player_details["room_name"]
+    update_player_map(player_id, game_room)
     put_player_in_room(
       map_players_in_room,
       player_details,
@@ -115,6 +113,7 @@ defmodule Goblet.MatchFunction2 do
     player_id_list = [player_id| player_ids]
     ets_insert_into_room_collection(map_players_in_room,game_room)
 
+    ets_remove_player_data(player_id)
     make_match(game_room, player_id_list, match_id)
   end
   defp put_player_in_room(map_players_in_room, player_details, true, true) do
@@ -137,6 +136,7 @@ defmodule Goblet.MatchFunction2 do
     player_id_list = [player_id| player_ids]
     ets_insert_into_room_collection(map_players_in_room,game_room)
 
+    ets_remove_player_data(player_id)
     make_match(game_room, player_id_list, match_id)
   end
   defp put_player_in_room(_map_players_in_room, _player_details, _player_in_room?, false), do: nil
@@ -152,7 +152,7 @@ defmodule Goblet.MatchFunction2 do
       "players" => player_id_list,
       "match_id" => match_id
     }
-    GobletWeb.Endpoint.broadcast!("match_maker:#{game_room}", "match_success", match_details)
+    GobletWeb.Endpoint.broadcast!("match_maker:#{game_room}", "match_found", match_details)
   end
 
   defp ets_insert_into_room_collection(player_map, game_room) do
@@ -185,6 +185,8 @@ defmodule Goblet.MatchFunction2 do
   defp remove_player_entry(player_map, player_id) do
     remove_player_entry(player_map, player_id, Map.has_key?(player_map,player_id))
   end
+
+  defp remove_player_entry(player_map, player_id, player_in_player_lobby_map)
   defp remove_player_entry(player_map, player_id, true) do
     game_room = player_map[player_id]
     player_map |> Map.delete(player_id) |> ets_insert_into_player_collection
@@ -193,7 +195,7 @@ defmodule Goblet.MatchFunction2 do
     |> Map.delete(player_id)
     |> ets_insert_into_room_collection(game_room)
   end
-  defp remove_player_entry(player_map, player_id, false), do: nil
+  defp remove_player_entry(_player_map, _player_id, false), do: nil
 
   defp get_map_players_in_lobby() do
     case :ets.lookup(:match_table, "players") do

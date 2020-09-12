@@ -3,8 +3,6 @@ defmodule Goblet.MatchFunction do
   require Logger
 
   ##################
-  # Client functions
-  ##################
 
   def start_link([]) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -14,148 +12,58 @@ defmodule Goblet.MatchFunction do
     GenServer.cast(__MODULE__, {"send_to_queue", player_details})
   end
 
-  @doc """
-    search_params :
-    - player_id
-    - room_name
-    - player_count
-    - others (some delimiter) [TO DO]
-  """
-  def find_match(search_params) do
-    GenServer.call(__MODULE__, {"find_match", search_params})
+  def remove_player(player_id) do
+    GenServer.cast(__MODULE__, {"remove_player", player_id})
   end
 
-
-  @doc """
-    search_params :
-    - player_id
-    - room_name
-    - match_id
-  """
-  def find_match_by_id(search_params) do
-    GenServer.call(__MODULE__, {"find_match_by_id", search_params})
-  end
-
-  def get_all(room_name) do
-    GenServer.call(__MODULE__, {"get_all", room_name})
-  end
-
-
-  def get_match(search_params) do
-    GenServer.cast(__MODULE__, {"get_match", search_params})
-  end
-
-
-
-  ##################
-  # Server Callbacks
-  ##################
+  #################
 
   @impl true
   def init(:ok) do
-    # Here we have to create an ETS.
-    # We dont need an expiry actually because we try to empty the queue anyway.
     Logger.info("...MatchMaker Started...")
     create_ets()
-
     {:ok, []}
   end
 
-
   @impl true
-  def handle_call({"find_match", search_params}, _from,  state) do
-    Logger.info(inspect(search_params))
+  def handle_cast({"send_to_queue", player_details}, state) do
+    player_details |> handle_room_entry()
+    {:noreply, state}
 
-    match_data = get_game_queue(search_params["room_name"])
-                  |> get_available_player_list(search_params)
-
-    {:reply, match_data, state}
   end
 
   @impl true
-  def handle_call({"find_match_by_id", search_params}, _from,  state) do
-    Logger.info(inspect(search_params))
-    ets_key_name = search_params["room_name"]<>":"<>search_params["match_id"]<>":"<>"#{search_params["player_count"] |> Integer.to_string}"
-    match_data = get_game_queue_by_matchid(ets_key_name)
-                  |> get_available_player_list(%{
-                    "room_name" => ets_key_name,
-                    "player_id" => search_params["player_id"],
-                    "player_count" => search_params["player_count"]
-                  })
-
-    {:reply, match_data, state}
-  end
-
-  def handle_call({"get_all", room_name}, _from,  state) do
-
-    room_data = room_name |> get_game_queue
-
-    {:reply, room_data, state}
+  def handle_cast({"remove_player", player_id}, state) do
+    ets_remove_player_data(player_id)
+    {:noreply, state}
   end
 
   @impl true
-  def handle_cast({"send_to_queue", player_details}, socket) do
-    push_player_to_queue(player_details)
-    {:noreply, socket}
+  def handle_info({"no_match", room_name}, state) do
+    GobletWeb.Endpoint.broadcast!("match_maker:#{room_name}", "match_not_found", %{})
+    {:noreply, state}
   end
 
-  @impl true
-  def handle_info({"search_again", search_params}, socket) do
-    ets_key_name = search_params["room_name"]<>":"<>search_params["match_id"]<>":"<>"#{search_params["player_count"] |> Integer.to_string}"
-    get_game_queue_by_matchid(ets_key_name)
-    |> get_available_player_list(%{
-      "room_name" => ets_key_name,
-      "player_id" => search_params["player_id"],
-      "player_count" => search_params["player_count"]
-    })
-    {:noreply, socket}
-  end
-
-
-  # def handle_cast({"get_match", search_param}, state) do
-  #   #search in queue room_id:playercount
-  #   #if no queue create queue-> push(%{player_id: "gzp_0", match_id: "", tries: 0}) -> process.semd_after(search_param)
-  #   #found queue -> search player_id -> if found -> if length < player_count-1 -> increase tries += 1 ->  process.semd_after(search_param)
-  #   #                                               else
-  # end
-  ##################
-  # Helper functions
-  ##################
+################
 
   defp create_ets() do
     :ets.new(:match_table, [:named_table])
     Logger.info("ETS Created")
   end
 
+  defp handle_room_entry(player_details) do
+    room_name = player_details["room_name"]
 
-  defp push_player_to_queue(player_details) do
-    game_queue = get_game_queue(player_details["room_name"])
-    push_player_to_queue(game_queue, player_details)
-  end
-  defp push_player_to_queue([], player_details) do
-    :ets.insert(:match_table, {player_details["room_name"], %{player_details["player_id"] => %{"player_count" => player_details["player_count"]}}})
-  end
-  defp push_player_to_queue(game_queue, player_details) do
-    cond do
-      should_push_player?(game_queue, player_details["player_id"]) ->
-        :ets.insert(:match_table, {player_details["room_name"], Map.put(game_queue,player_details["player_id"], %{"player_count" => player_details["player_count"]})})
-      true -> nil
-    end
+    Process.send_after(self(), {"no_match", room_name}, 60_000)
+    room_name
+    |> get_map_players_in_room()
+    |> put_player_in_room(player_details)
   end
 
-  defp should_push_player?(game_queue, player_id) do
-      !Map.has_key?(game_queue, player_id)
-  end
-
-
-  # returns player list of a game_room
-  # [p1, p2, p3 ...] // []
-  defp get_game_queue(room_name) do
+  defp get_map_players_in_room(room_name) do
     case :ets.lookup(:match_table, room_name) do
-      [{_room_name_key, game_queue}] ->
-        game_queue
-
-
+      [{_room_name_key, map_players_in_room}] ->
+        map_players_in_room
       _ ->
         Logger.info("Not yet inserted anything")
         []
@@ -163,58 +71,139 @@ defmodule Goblet.MatchFunction do
   end
 
 
-  defp get_available_player_list([], search_params), do: add_player_to_queue([], search_params)
-  defp get_available_player_list(game_queue, search_params) do
-    players = game_queue |> Enum.filter(fn player_id -> player_id != search_params["player_id"] end)
 
-    cond do
-      Enum.count(players)>= search_params["player_count"]-1 ->
-        player_list = players |> Enum.take(search_params["player_count"]-1)
-        :ets.insert(:match_table, {search_params["room_name"], players--player_list})
-        create_match([search_params["player_id"]| player_list], search_params["room_name"])
-      true ->
-        cond do
-          Enum.any?(game_queue, fn player_id -> player_id == search_params["player_id"] end) ->
-            %{"match_id" => "", "players" => []}
-          true ->
-            add_player_to_queue(game_queue, search_params)
-        end
+  defp put_player_in_room([], player_details) do
+    player_id = player_details["player_id"]
+    game_room = player_details["room_name"]
+    match_id = player_details["match_id"] || ""
+    map_first_player_in_room = Map.new([{player_id, %{"match_id" => match_id}}])
+    update_player_map(player_id, game_room)
+    ets_insert_into_room_collection(map_first_player_in_room, game_room)
+  end
+
+  defp put_player_in_room(map_players_in_room, player_details) do
+    player_id = player_details["player_id"]
+    player_count = player_details["player_count"]
+    players_in_room_count = map_players_in_room |> Map.keys |> Enum.count
+    game_room = player_details["room_name"]
+    update_player_map(player_id, game_room)
+    put_player_in_room(
+      map_players_in_room,
+      player_details,
+      Map.has_key?(map_players_in_room,player_id),
+      players_in_room_count + 1 >= player_count
+      )
+  end
+
+  defp put_player_in_room(map_players_in_room, player_details, player_in_room?, sufficient_players?)
+  defp put_player_in_room(map_players_in_room, player_details, false, true) do
+    game_room = player_details["room_name"]
+    player_id = player_details["player_id"]
+    player_count = player_details["player_count"]
+    match_id = player_details["match_id"] || ""
+
+    player_ids =
+      map_players_in_room
+      |>  Map.keys
+      |> Enum.take(player_count-1)
+
+    map_players_in_room =
+      player_ids
+      |> Enum.reduce(map_players_in_room, fn x,acc -> Map.delete(acc, x) end)
+    player_id_list = [player_id| player_ids]
+    ets_insert_into_room_collection(map_players_in_room,game_room)
+
+    ets_remove_player_data(player_id)
+    make_match(game_room, player_id_list, match_id)
+  end
+  defp put_player_in_room(map_players_in_room, player_details, true, true) do
+    game_room = player_details["room_name"]
+    player_id = player_details["player_id"]
+    player_count = player_details["player_count"]
+    match_id = player_details["match_id"] || ""
+
+    map_players_in_room = Map.delete(map_players_in_room, player_id)
+
+    player_ids =
+      map_players_in_room
+      |> Map.keys
+      |> Enum.take(player_count-1)
+
+    map_players_in_room =
+      player_ids
+      |> Enum.reduce(map_players_in_room, fn x,acc -> Map.delete(acc, x) end)
+
+    player_id_list = [player_id| player_ids]
+    ets_insert_into_room_collection(map_players_in_room,game_room)
+
+    ets_remove_player_data(player_id)
+    make_match(game_room, player_id_list, match_id)
+  end
+  defp put_player_in_room(_map_players_in_room, _player_details, _player_in_room?, false), do: nil
+
+
+  defp make_match(game_room, player_id_list, match_id) do
+    match_id =
+      case match_id do
+      "" ->  UUID.uuid4()
+      _ -> match_id
     end
+    match_details = %{
+      "players" => player_id_list,
+      "match_id" => match_id
+    }
+    GobletWeb.Endpoint.broadcast!("match_maker:#{game_room}", "match_found", match_details)
   end
 
-  defp create_match(player_list, room_name) do
-    match_data = %{"players" => player_list, "match_id" => UUID.uuid4()}
-    Logger.info("Match Data")
-    Logger.info(inspect(match_data))
-    # match_data
-    GobletWeb.Endpoint.broadcast!("match_maker:#{room_name}", "match_success", match_data)
+  defp ets_insert_into_room_collection(player_map, game_room) do
+    :ets.insert(:match_table, {game_room, player_map})
   end
 
-  defp add_player_to_queue([], search_params) do
-    :ets.insert(:match_table, {search_params["room_name"], [search_params["player_id"]]})
-    Process.send_after(self(),{"search_again", search_params}, 10000)
-    %{"players" => [], "match_id" => ""}
+  defp ets_insert_into_player_collection(players_map) do
+    :ets.insert(:match_table, {"players", players_map})
   end
 
-  defp add_player_to_queue(game_queue, search_params) do
-    Logger.info("Opponent Not available in Queue, Adding to Queue")
-    :ets.insert(:match_table, {search_params["room_name"], [search_params["player_id"] | game_queue]})
-    Process.send_after(self(),{"search_again", search_params}, 10000)
-    %{"players" => [], "match_id" => ""}
+  defp update_player_map(player_id, game_room) do
+    get_map_players_in_lobby()
+    |> update_player_map(player_id, game_room)
+    |> ets_insert_into_player_collection
   end
 
-  defp get_game_queue_by_matchid(ets_key_name) do
-    case :ets.lookup(:match_table, ets_key_name) do
-      [{_room_name_key, game_queue}] ->
-        game_queue
+  defp update_player_map([],player_id, game_room) do
+    %{player_id => game_room}
+  end
+  defp update_player_map(player_map,player_id, game_room) do
+    Map.put player_map, player_id, game_room
+  end
 
+  defp ets_remove_player_data(player_id) do
+    get_map_players_in_lobby()
+    |> remove_player_entry(player_id)
+  end
+
+  defp remove_player_entry([], _player_id), do: nil
+  defp remove_player_entry(player_map, player_id) do
+    remove_player_entry(player_map, player_id, Map.has_key?(player_map,player_id))
+  end
+
+  defp remove_player_entry(player_map, player_id, player_in_player_lobby_map)
+  defp remove_player_entry(player_map, player_id, true) do
+    game_room = player_map[player_id]
+    player_map |> Map.delete(player_id) |> ets_insert_into_player_collection
+    game_room
+    |> get_map_players_in_room()
+    |> Map.delete(player_id)
+    |> ets_insert_into_room_collection(game_room)
+  end
+  defp remove_player_entry(_player_map, _player_id, false), do: nil
+
+  defp get_map_players_in_lobby() do
+    case :ets.lookup(:match_table, "players") do
+      [{_room_name_key, map_players_in_lobby}] ->
+        map_players_in_lobby
       _ ->
         Logger.info("Not yet inserted anything")
         []
     end
   end
-
-  # defp retry_matching(match_param) do
-  #   Process.send_after(self(), {"retry", match_params})
-  # end
 end
