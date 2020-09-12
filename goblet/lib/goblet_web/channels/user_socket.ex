@@ -2,7 +2,7 @@ defmodule GobletWeb.UserSocket do
   use Phoenix.Socket
 
   ## Channels
-  # channel "room:*", GobletWeb.RoomChannel
+  channel "match_maker:*", GobletWeb.MatchMakerChannel
 
   # Socket params are passed from the client and can
   # be used to verify and authenticate a user. After
@@ -16,7 +16,8 @@ defmodule GobletWeb.UserSocket do
   # See `Phoenix.Token` documentation for examples in
   # performing token verification on connect.
   @impl true
-  def connect(_params, socket, _connect_info) do
+  def connect(params, socket, _connect_info) do
+    socket = assign(socket, :player_id, params["player_id"])
     {:ok, socket}
   end
 

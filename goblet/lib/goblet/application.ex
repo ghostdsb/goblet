@@ -13,7 +13,7 @@ defmodule Goblet.Application do
       {Phoenix.PubSub, name: Goblet.PubSub},
       # Start the Endpoint (http/https)
       GobletWeb.Endpoint,
-      Goblet.MatchWorker
+      Goblet.MatchFunction
       # Start a worker by calling: Goblet.Worker.start_link(arg)
       # {Goblet.Worker, arg}
     ]
